@@ -1,0 +1,398 @@
+'''
+------------------------------------------------------------------------------------------------------------------------
+
+PROJECT TITLE:
+Applying global sensitivity analysis and calibration for simple climate model projections.
+Case Study: Future global mean near-surface air temperature (GMT) projections
+under the representative concentration pathway (RCP) 2.6,
+using MAGICC, the simple climate model (SCM).
+
+------------------------------------------------------------------------------------------------------------------------
+'''
+# Install MAGICC Simple Climate Model:
+pip install pymagicc
+
+# Install Sensitivity Analysis (SA) Library - SALib:
+pip install SALib
+
+''' Ad hoc, update to the latest version of SALib:
+    git clone https://github.com/SALib/SALib.git
+    cd SALib
+    pip install . 
+------------------------------------------------------------------------------------------------------------------------
+'''
+# Import Python's Data Analytics libraries:
+from pathlib import Path  
+import pandas as pd
+import numpy as np
+from matplotlib import pyplot as plt
+import seaborn as sns
+
+# Import the Magicc's, Simple Climate Model, libraries:
+import pymagicc
+import scmdata
+from pymagicc import rcps
+
+# Generated values for selected parmeters are inputted with 'read_scen_file' method
+from pymagicc.scenarios import read_scen_file
+
+# RCP 2.6 is used in this study
+from pymagicc.scenarios import rcp26
+
+# Import SALib's libraries:
+#    1) saltelli - sample generator
+#    2) pawn - global sensitivity analysis method
+from SALib.sample import saltelli
+from SALib.analyze import pawn
+
+'''PAWN Method Arguments Explainer:
+        SALib.analyze.pawn.analyze(
+            problem: Dict, X: ndarray, Y: ndarray, S: int = 10 (default), print_to_console: bool = False, seed: int = None,
+        )'''
+'''
+------------------------------------------------------------------------------------------------------------------------
+'''
+# Input data specific to the project evaluations:
+
+# i. raw data file paths
+OBSERVED_DATA_FILEPATH = 'Users/aliaksandrilyukevich/Desktop/Birkbeck_PG_Cert_Applied_Data_Science_Project/observed_temperature_data.csv'
+SIMULATED_DATA_FILEPATH = 'Users/aliaksandrilyukevich/Desktop/Birkbeck_PG_Cert_Applied_Data_Science_Project/simulated_temperature_data.csv'
+
+# ii. raw data file columns used for dataframes
+OBSERVED_DATA_COLS_LIST = [
+     'year',
+     'value',
+     ]
+SIMULATED_DATA_COLS_LIST = [
+    'year',
+    'value',
+    'beta',
+    'k',
+    'ecs',
+    'q10',
+    'av',
+    'aa',
+    ]
+
+# iii. parameters' list for MAGICC input
+PARAMETERS = [
+    'beta',
+    'k',
+    'ecs',
+    'q10',
+    'av',
+    'aa',
+    ]
+
+# iv. period for model future projections
+MINIMUM_YEAR = 2023
+MAXIMUM_YEAR = 2100
+
+# v. model inputs definition
+PROBLEM = {
+        'num_vars': 6,
+        'parameters': [
+            'beta',
+            'k',
+            'ecs',
+            'q10',
+            'av',
+            'aa',
+            ],
+        'bounds': [
+            [0, 5],
+            [0.0001, 50],
+            [1, 6],
+            [0, 10],
+            [0, 1],
+            [0, 2.5],
+            ]
+    }
+
+# vi. model error ratio selection in relation to observed error
+RATIO_BETWEEN_MODEL_AND_OBSERVED_ERRORS = 1.25
+
+# vii. text file with model outputs for sensitivity analysis
+OUTPUTS = np.loadtxt('outputs.txt', float)
+
+'''
+------------------------------------------------------------------------------------------------------------------------
+10 METHODS ARE DESIGNED TO RUN THE PROJECT EVALUATIONS.
+    THE METHODS ARE SPLIT INTO 3 CATEGORIES:
+        1. PARAMETERS' SIMULATION, MODEL RUN, AND SENSITIVITY ANALYSIS
+        2. CALIBRATION
+        3. MODEL OUTPUT PROJECTION
+------------------------------------------------------------------------------------------------------------------------
+SIMULATE PARAMETERS' VALUES, RUN THE MODEL, AND PERFORM SENSITIVITY ANALYSIS,
+    following the SALib methodological steps (Herman & Usher, 2017):
+            I. Defining parameter inputs and their ranges (see PROBLEM dictionary above);
+            II. Generating the model inputs by implementing the sample function;
+            III. Running the model with the generated parameter values;
+            IV. Calculating the SA indices by applying the analyze function on the model outputs.
+'''
+            # METHOD 1
+def generate_model_inputs(problem: dict) -> np.array:
+    # Generate parameters' values within the given ranges:
+    param_values = saltelli.sample(problem, 1024)
+    
+    return param_values
+
+            # METHOD 2
+def run_model(*args, **kwargs) -> pd.DataFrame:
+    # Run MAGICC model with selected PPE under RCP 2.6 and return the output to pd.DataFrame:
+    scenario = read_scen_file("param_values.txt")
+    results = pymagicc.run(scenario)
+    outputs = (
+        results
+        .filter(variable="Surface Temperature", region="World", rcp=rcp26, parameters=PARAMETERS)
+        .relative_to_ref_period_mean(year=range(1850, 1900 + 1))
+    )
+    simulated_data = outputs.to_df()
+
+    return simulated_data
+
+            # METHOD 3
+def calculate_sa_indices(problem: dict, X: np.array, Y: np.array) -> pd.DataFrame:
+    # Run PAWN Global Sensitivity Analysis:
+    Si = pawn.analyze(
+        problem,
+        X,
+        Y,
+        S=10,
+        print_to_console=False
+        )
+    # Return sa indices in dataframe format:
+    sa_indices = Si.to_df()
+
+    return sa_indices
+
+            # METHOD 4
+def visualise_sa_results(sa_indices: pd.DataFrame) -> sns.barplot:
+    # Visualise SA results with Seaborn barplots:
+    sns.set_context('notebook')
+    sns.set_style('darkgrid', {
+        "grid.color": '.7',
+        "grid.linestyle": ':',
+        }
+        )
+    sns.FacetGrid(sa_indices, hue='pawn indices', height=8)
+
+    sa_results_barplots = sns.barplot(
+            data = sa_indices,
+            x = 'parameters',
+            y = 'value',
+            hue='pawn indices',
+            palette = 'colorblind',
+            edgecolor = 'w',
+            )
+        
+    return sa_results_barplots
+
+'''  
+------------------------------------------------------------------------------------------------------------------------
+PERFORM CALIBRATION,
+    following Williamson et al. (2013) methodological steps:
+            I. Calculating absolute differences between simulated and observed values;
+            II. Calculating a total model error and defining 'Not Ruled Out Yet' regions
+                in parameter value distributions.
+            III. Evaluating the uncertainty in parameters' simulations.
+'''
+            # METHOD 5
+def get_and_prepare_data_for_calibration(filepath: str, use_columns: list, value_name: str) -> pd.DataFrame:
+    # Read csv file and use selected columns from the raw dataset:
+    data_for_calibration = pd.read_csv(filepath, usecols=use_columns)
+              
+    # Rename column name for specification:
+    data_for_calibration.rename(columns={'value': value_name}, inplace=True)
+    
+    return data_for_calibration
+
+            # METHOD 6
+def calculate_total_model_error(observed_data: pd.DataFrame) -> float:
+    # calculate observed error with 95% confidence interval:
+    std_with_95_percent_of_the_observations = observed_data['observed_value'].std() * (1.96)
+    sqrt_of_number_of_observations = np.sqrt(len(observed_data['observed_value']))
+    observed_error = std_with_95_percent_of_the_observations / sqrt_of_number_of_observations
+    
+    # estimate model error, referring to literature ():
+    model_error = observed_error * RATIO_BETWEEN_MODEL_AND_OBSERVED_ERRORS
+
+    # get total model error:
+    total_model_error = (observed_error + model_error)
+
+    return total_model_error
+
+            # METHOD 7        
+def calibrate_data(data_for_calibration: pd.DataFrame) -> pd.DataFrame:
+    # Calculate the absolute difference between simulated and observed values:
+    data_for_calibration['difference'] = data_for_calibration.loc[:, 'simulated_value'] - data_for_calibration.loc[:, 'observed_value']
+    data_for_calibration['difference'] = data_for_calibration['difference'].abs()
+    
+    # Calculate implausibility of simulated values:
+    data_for_calibration['implausibility'] = data_for_calibration.loc[:, 'difference'] / (total_model_error)
+    
+    # Filter out simulated values with implausibility >= 3, which difine 'Not Ruled Out Yet' regions of the parameter values:
+    data_for_calibration = data_for_calibration[data_for_calibration['implausibility'] < 3]
+    
+    # Return parameters from list-like columns to one long format column:
+    data_for_calibration = pd.melt(data_for_calibration,
+                                   id_vars=[
+                                       'simulated_value',
+                                       'observed_value',
+                                       'difference',
+                                       'implausibility', 
+                                       'year',
+                                       ]
+                                       )
+
+    # Rename columns for consistency and clarity,
+    # as melt function returns 'variable' and 'value' column names by default :
+    data_for_calibration.rename(columns={'variable': 'parameters', 'value': 'parameter_value'}, inplace=True)
+
+    # Select applicable columns:
+    calibrated_data = data_for_calibration[[
+        'parameters',
+        'parameter_value'
+        'simulated_value',
+        'year',
+        ]]
+    
+    return calibrated_data
+
+            # METHOD 8
+def evaluate_parameters_uncertainties_with_boxplots(calibrated_data: pd.DataFrame) -> sns.boxplot:
+    # Prepare dataframe for visualisation:
+    calibrated_data_for_boxplots = calibrated_data[['parameters', 'parameter_value']]
+
+    # Visualise with Seaborn boxplots:
+    sns.set_context('notebook')
+    sns.set_style('darkgrid', {
+        "grid.color": '.7',
+        "grid.linestyle": ':',
+        }
+        )
+    parameter_uncertainty_boxplots = sns.boxplot(
+        data=calibrated_data_for_boxplots ,
+        x='parameters',
+        y='parameter_value',
+        palette = 'colorblind'
+        ).set(title='Parameters')
+
+    return parameter_uncertainty_boxplots
+'''
+------------------------------------------------------------------------------------------------------------------------
+PROJECT MODEL OUTPUT,
+    with the following steps:
+        I. Selecting future projections range;
+        II. Visualising the output projection and its uncertainty band.
+'''
+            # METHOD 9
+def get_post_calibration_projections_for_selected_period(
+        calibrated_data: pd.DataFrame,
+        simulated_data: pd.DataFrame,
+        min_year: int,
+        max_year: int,
+        ) -> pd.DataFrame:
+    # To get future projections, prepare simulated_data and calibrated_data for merging:
+    simulated_data = pd.melt(simulated_data, id_vars=['year', 'simulated_value'])
+    simulated_data.rename(
+        columns={
+            'variable':'parameters',
+            'value':'parameter_value',
+            }, inplace=True)
+
+    calibrated_data = calibrated_data[[
+        'parameters',
+        'parameter_value'
+        ]]
+    
+    # Get calibrated data for future projections:
+    calibrated_data_projections = pd.merge(
+        calibrated_data,
+        simulated_data,
+        how='inner',
+        on=['parameters', 'parameter_value']
+        )
+    
+    # Select data for a specific period:
+    calibrated_data_projections = calibrated_data_projections[(calibrated_data_projections['year'] >= min_year) & (calibrated_data_projections['year'] <= max_year)]
+
+    return calibrated_data_projections
+
+            # METHOD 10
+def visualise_calibrated_data_projections_with_lineplot(calibrated_data_projections: pd.DataFrame, y_axis_name: str) -> sns.lineplot:
+    # Prepare data for visualisation:
+    prepare_data_for_lineplot = calibrated_data_projections[['year', 'simulated_value']]
+    prepare_data_for_lineplot.rename(columns={'simulated_value': y_axis_name}, inplace=True)
+    
+    # Visualise with Seaborn lineplot:
+    plt.figure(figsize=(10, 6))
+    sns.set_context('notebook')
+    sns.set_style('darkgrid', {
+        "grid.color": '.7',
+        "grid.linestyle": ':',
+        }
+        )
+    calibrated_data_lineplot = sns.lineplot(
+        data=prepare_data_for_lineplot,
+        x='year',
+        y=y_axis_name
+        )
+    return calibrated_data_lineplot
+
+'''
+------------------------------------------------------------------------------------------------------------------------
+RUN THE CALCULATIONS WITH THE METHODS LISTED ABOVE:
+'''
+# STEP 1: APPLY METHOD 1
+param_values = generate_model_inputs(problem=PROBLEM)
+# Save txt file with generated parameters' values to input into a model:
+np.savetxt('param_values.txt', param_values)
+
+# STEP 2: APPLY METHOD 2 AND SAVE DATA FRAME AS CSV FILE
+simulated_data = run_model()
+filepath = Path('Users/aliaksandrilyukevich/Desktop/Birkbeck_PG_Cert_Applied_Data_Science_Project/simulated_temperature_data.csv')  
+simulated_data.to_csv(filepath)
+
+# ADDITIONALLY, TO MEET THE SALIB PAWN SA REQUIREMENTS, DATA FRAME IS CONVERTED TO NUMPY AND SAVED AS A TEXT FILE.
+simulated_data_numpy = simulated_data.to_numpy()
+np.savetxt('outputs.txt', simulated_data_numpy)
+
+# STEP 3: APPLY METHOD 3
+sa_indices = calculate_sa_indices(
+    problem=PROBLEM, 
+    X=param_values,
+    Y=OUTPUTS,
+    )
+
+# STEP 4: APPLY METHOD 4
+sa_results_barplots = visualise_sa_results(sa_indices=sa_indices)
+plt.show()
+
+# STEP 5: APPLY METHOD 5
+observed_data = get_and_prepare_data_for_calibration(filepath=OBSERVED_DATA_FILEPATH, use_columns=OBSERVED_DATA_COLS_LIST, value_name='observed_value')
+simulated_data = get_and_prepare_data_for_calibration(filepath=SIMULATED_DATA_FILEPATH, use_columns=SIMULATED_DATA_COLS_LIST, value_name='simulated_value')
+data_for_calibration = pd.merge(observed_data, simulated_data, how='inner', on=['year'])
+
+# STEP 6: APPLY METHOD 6
+total_model_error = calculate_total_model_error(observed_data=observed_data)
+
+# STEP 7: APPLY METHOD 7
+calibrated_data = calibrate_data(data_for_calibration=data_for_calibration)
+
+# STEP 8: APPLY METHOD 8
+parameter_uncertainty_boxplots = evaluate_parameters_uncertainties_with_boxplots(
+    calibrated_data=calibrated_data,
+    )
+plt.show()
+
+# STEP 9: APPLY METHOD 9
+calibrated_data_projections = get_post_calibration_projections_for_selected_period(
+    calibrated_data=calibrated_data,
+    simulated_data=simulated_data,
+    min_year=MINIMUM_YEAR,
+    max_year=MAXIMUM_YEAR)
+
+# STEP 10: APPLY METHOD 10
+calibrated_data_lineplot = visualise_calibrated_data_projections_with_lineplot(calibrated_data_projections=calibrated_data_projections, y_axis_name='Global Mean Temperature Anomaly (°C)')
+plt.show()
