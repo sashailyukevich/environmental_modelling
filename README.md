@@ -55,3 +55,4 @@ Additionally, numerous inquiries are run at the cleaning and exploration stages 
 6.	.isna().sum() calculates the total number of NA values.
 
 To complete, the data exploration stage indicated no missing data or any anomalies, which could have compromised further assessment.
+# machine_learning
